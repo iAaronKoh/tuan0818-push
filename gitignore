@@ -1,0 +1,9 @@
+# 日志
+*.log
+
+# 去重历史记录
+tuan0818_history.json
+
+# Python
+__pycache__/
+*.pyc
