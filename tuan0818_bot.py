@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-0818tuan.com 优惠信息采集 + 企业微信机器人推送（保留链接版）
+0818tuan.com 优惠信息采集 + 企业微信机器人推送（修复链接保留版）
 
 用法：
   export WEBHOOK_URL="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
@@ -156,13 +156,33 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
         if content_match:
             raw_html = content_match.group(1)
 
-            # 去掉 script/style/iframe/noscript
+            # ========== 第一步：先提取所有链接（在删任何标签之前）==========
+            def replace_link(m):
+                href = m.group(1).strip()
+                link_text = m.group(2).strip()
+                href = href.replace('&amp;', '&')
+                # 如果链接文本就是链接本身，且很短，直接返回链接
+                if link_text == href or (len(link_text) < 5 and href.startswith('http')):
+                    return href
+                # 否则返回 文本(链接)
+                return f"{link_text}({href})"
+
+            # 匹配 <a href="...">...</a>，包括标签内有其他标签的情况
+            raw_html = re.sub(
+                r'<a\s+[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                replace_link,
+                raw_html,
+                flags=re.S | re.I
+            )
+
+            # ========== 第二步：去掉 script/style/iframe/noscript ==========
             raw_html = re.sub(r'<script.*?</script>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<style.*?</style>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<iframe.*?</iframe>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<noscript.*?</noscript>', '', raw_html, flags=re.S)
 
-            # 去掉垃圾标签块（通过 class/id 属性）
+            # ========== 第三步：只删除明确的垃圾标签块（非贪婪匹配，避免误删链接）==========
+            # 注意：这里用非贪婪 .*? 匹配，且只匹配到最近的闭合标签
             trash_classes = [
                 'share', 'collect', 'favorite', 'fav', 'bookmark',
                 'prev', 'next', 'previous', 'navigation', 'nav', 'pager',
@@ -174,34 +194,18 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
                 'tag', 'keyword', 'category', 'source', 'editor', 'author',
                 'read', 'view', 'click', 'count', 'stat',
             ]
-            trash_pattern = (
-                r'<(?:div|span|p|a|section|aside|footer|nav)[^>]*(?:class|id)="[^"]*(?:' +
-                '|'.join(trash_classes) +
-                r')[^"]*"[^>]*>.*?(?:</(?:div|span|p|a|section|aside|footer|nav)>)'
-            )
-            raw_html = re.sub(trash_pattern, '', raw_html, flags=re.S | re.I)
 
-            # ========== 关键修复：保留链接 ==========
-            # 先把 <a href="xxx">文本</a> 转换成 [文本](xxx)
-            def replace_link(m):
-                href = m.group(1)
-                link_text = m.group(2)
-                # 清理 href 里的 HTML 实体
-                href = href.replace('&amp;', '&')
-                # 如果链接文本和链接一样短，只返回链接
-                if len(link_text.strip()) < 3 and href.startswith('http'):
-                    return href
-                return f"{link_text}({href})"
+            # 逐个关键词删除（非贪婪，避免跨标签匹配）
+            for kw in trash_classes:
+                # 匹配 <tag class/id="...kw...">...</tag>，非贪婪
+                pattern = (
+                    r'<(?:div|span|p|section|aside|footer|nav|ul|ol)[^>]*(?:class|id)="[^"]*' +
+                    kw +
+                    r'[^"]*"[^>]*>.*?</(?:div|span|p|section|aside|footer|nav|ul|ol)>'
+                )
+                raw_html = re.sub(pattern, '', raw_html, flags=re.S | re.I)
 
-            # 匹配 <a href="...">...</a>，支持标签内有其他标签
-            raw_html = re.sub(
-                r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-                replace_link,
-                raw_html,
-                flags=re.S | re.I
-            )
-
-            # 转换其他 HTML 标签为文本
+            # ========== 第四步：转换剩余 HTML 标签为文本 ==========
             raw_html = re.sub(r'<br\s*/?>', '\n', raw_html, flags=re.S)
             raw_html = re.sub(r'<p>', '\n', raw_html, flags=re.S)
             raw_html = re.sub(r'</p>', '', raw_html, flags=re.S)
@@ -212,10 +216,10 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
             raw_html = re.sub(r'<tr>', '\n', raw_html, flags=re.S)
             raw_html = re.sub(r'<td>', '\t', raw_html, flags=re.S)
             raw_html = re.sub(r'</tr>|</td>', '', raw_html, flags=re.S)
-            # 去掉所有剩余标签
+            # 去掉所有剩余标签（此时 <a> 已经处理过了）
             raw_html = re.sub(r'<[^>]+>', '', raw_html, flags=re.S)
 
-            # 处理 HTML 实体
+            # ========== 第五步：处理 HTML 实体 ==========
             raw_html = raw_html.replace('&nbsp;', ' ')
             raw_html = raw_html.replace('&quot;', '"')
             raw_html = raw_html.replace('&amp;', '&')
@@ -230,6 +234,7 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
 
             content = raw_html.strip()
 
+        # 兜底
         if not content:
             content = title
 
