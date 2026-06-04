@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-0818tuan.com 优惠信息采集 + 企业微信机器人推送（纯文本直接显示版，保守清洗）
+0818tuan.com 优惠信息采集 + 企业微信机器人推送（保留链接版）
 
 用法：
   export WEBHOOK_URL="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
@@ -138,19 +138,16 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
         )
         pub_time = time_match.group(1) if time_match else ""
 
-        # ========== 提取正文（保守策略） ==========
+        # ========== 提取正文 ==========
         content = ""
 
-        # 策略1：尝试匹配 article 标签
         content_match = re.search(r'<article[^>]*>(.*?)</article>', text, re.S)
         if not content_match:
-            # 策略2：尝试匹配常见的正文 div（class 含 content/post/entry）
             content_match = re.search(
                 r'<div[^>]*class="[^"]*(?:content|post|entry)[^"]*"[^>]*>(.*?)</div>',
                 text, re.S
             )
         if not content_match:
-            # 策略3：尝试匹配 id 为 content 的 div
             content_match = re.search(
                 r'<div[^>]*id="[^"]*(?:content|post|entry)[^"]*"[^>]*>(.*?)</div>',
                 text, re.S
@@ -159,14 +156,13 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
         if content_match:
             raw_html = content_match.group(1)
 
-            # 第一步：去掉 script/style/iframe/noscript 等标签及其内容
+            # 去掉 script/style/iframe/noscript
             raw_html = re.sub(r'<script.*?</script>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<style.*?</style>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<iframe.*?</iframe>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<noscript.*?</noscript>', '', raw_html, flags=re.S)
 
-            # 第二步：只删除明确的垃圾标签（通过标签属性精确匹配）
-            # 匹配 class 或 id 包含以下关键词的 div/span/p/a 标签
+            # 去掉垃圾标签块（通过 class/id 属性）
             trash_classes = [
                 'share', 'collect', 'favorite', 'fav', 'bookmark',
                 'prev', 'next', 'previous', 'navigation', 'nav', 'pager',
@@ -178,7 +174,6 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
                 'tag', 'keyword', 'category', 'source', 'editor', 'author',
                 'read', 'view', 'click', 'count', 'stat',
             ]
-            # 构建正则：匹配 <tag class="...trash...">...</tag> 或 <tag id="...trash...">...</tag>
             trash_pattern = (
                 r'<(?:div|span|p|a|section|aside|footer|nav)[^>]*(?:class|id)="[^"]*(?:' +
                 '|'.join(trash_classes) +
@@ -186,7 +181,27 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
             )
             raw_html = re.sub(trash_pattern, '', raw_html, flags=re.S | re.I)
 
-            # 第三步：转换 HTML 标签为文本格式
+            # ========== 关键修复：保留链接 ==========
+            # 先把 <a href="xxx">文本</a> 转换成 [文本](xxx)
+            def replace_link(m):
+                href = m.group(1)
+                link_text = m.group(2)
+                # 清理 href 里的 HTML 实体
+                href = href.replace('&amp;', '&')
+                # 如果链接文本和链接一样短，只返回链接
+                if len(link_text.strip()) < 3 and href.startswith('http'):
+                    return href
+                return f"{link_text}({href})"
+
+            # 匹配 <a href="...">...</a>，支持标签内有其他标签
+            raw_html = re.sub(
+                r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                replace_link,
+                raw_html,
+                flags=re.S | re.I
+            )
+
+            # 转换其他 HTML 标签为文本
             raw_html = re.sub(r'<br\s*/?>', '\n', raw_html, flags=re.S)
             raw_html = re.sub(r'<p>', '\n', raw_html, flags=re.S)
             raw_html = re.sub(r'</p>', '', raw_html, flags=re.S)
@@ -200,7 +215,7 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
             # 去掉所有剩余标签
             raw_html = re.sub(r'<[^>]+>', '', raw_html, flags=re.S)
 
-            # 第四步：处理 HTML 实体
+            # 处理 HTML 实体
             raw_html = raw_html.replace('&nbsp;', ' ')
             raw_html = raw_html.replace('&quot;', '"')
             raw_html = raw_html.replace('&amp;', '&')
@@ -215,7 +230,6 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
 
             content = raw_html.strip()
 
-        # 兜底：如果正文为空，用标题
         if not content:
             content = title
 
