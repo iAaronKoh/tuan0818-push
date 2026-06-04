@@ -359,7 +359,7 @@ def main():
 
     if pushed_count > 0:
         summary = (
-            f"📢 0818tuan 推送完成\n"
+            f"📢 你好,KOH 信息推送完成\n"
             f"本次推送: {pushed_count} 条\n"
             f"累计记录: {len(history)} 条"
         )
