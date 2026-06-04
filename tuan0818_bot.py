@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-0818tuan.com 优惠信息采集 + 企业微信机器人推送（纯文本直接显示版，已清理无用信息）
+0818tuan.com 优惠信息采集 + 企业微信机器人推送（纯文本直接显示版，保守清洗）
 
 用法：
   export WEBHOOK_URL="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
@@ -138,15 +138,15 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
         )
         pub_time = time_match.group(1) if time_match else ""
 
-        # ========== 提取正文（改进版） ==========
+        # ========== 提取正文（保守策略） ==========
         content = ""
 
         # 策略1：尝试匹配 article 标签
         content_match = re.search(r'<article[^>]*>(.*?)</article>', text, re.S)
         if not content_match:
-            # 策略2：尝试匹配常见的正文 div
+            # 策略2：尝试匹配常见的正文 div（class 含 content/post/entry）
             content_match = re.search(
-                r'<div[^>]*class="[^"]*(?:content|post|entry|article)[^"]*"[^>]*>(.*?)</div>',
+                r'<div[^>]*class="[^"]*(?:content|post|entry)[^"]*"[^>]*>(.*?)</div>',
                 text, re.S
             )
         if not content_match:
@@ -159,23 +159,34 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
         if content_match:
             raw_html = content_match.group(1)
 
-            # 先去掉 script/style/iframe/noscript
+            # 第一步：去掉 script/style/iframe/noscript 等标签及其内容
             raw_html = re.sub(r'<script.*?</script>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<style.*?</style>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<iframe.*?</iframe>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<noscript.*?</noscript>', '', raw_html, flags=re.S)
 
-            # 去掉常见的尾部垃圾区域（加入收藏、上一篇下一篇等）
-            # 这些通常在一个 div 或 p 标签里
-            trash_patterns = [
-                r'<div[^>]*class="[^"]*(?:share|collect|favorite|nav|prev|next|related|comment|footer)[^"]*"[^>]*>.*?(?:</div>|</p>|</span>)',
-                r'<p[^>]*class="[^"]*(?:share|collect|favorite|nav|prev|next)[^"]*"[^>]*>.*?</p>',
-                r'<div[^>]*id="[^"]*(?:share|collect|favorite|nav|prev|next|related|comment)[^"]*"[^>]*>.*?(?:</div>|</p>|</span>)',
+            # 第二步：只删除明确的垃圾标签（通过标签属性精确匹配）
+            # 匹配 class 或 id 包含以下关键词的 div/span/p/a 标签
+            trash_classes = [
+                'share', 'collect', 'favorite', 'fav', 'bookmark',
+                'prev', 'next', 'previous', 'navigation', 'nav', 'pager',
+                'related', 'recommend', 'guess', 'hot', 'sidebar',
+                'comment', 'reply', 'discuss', 'message',
+                'footer', 'copyright', 'declare', 'disclaimer',
+                'ad', 'ads', 'advert', 'sponsor', 'donate', 'reward',
+                'back', 'return', 'top', 'gotop', 'scrolltop',
+                'tag', 'keyword', 'category', 'source', 'editor', 'author',
+                'read', 'view', 'click', 'count', 'stat',
             ]
-            for tp in trash_patterns:
-                raw_html = re.sub(tp, '', raw_html, flags=re.S)
+            # 构建正则：匹配 <tag class="...trash...">...</tag> 或 <tag id="...trash...">...</tag>
+            trash_pattern = (
+                r'<(?:div|span|p|a|section|aside|footer|nav)[^>]*(?:class|id)="[^"]*(?:' +
+                '|'.join(trash_classes) +
+                r')[^"]*"[^>]*>.*?(?:</(?:div|span|p|a|section|aside|footer|nav)>)'
+            )
+            raw_html = re.sub(trash_pattern, '', raw_html, flags=re.S | re.I)
 
-            # 转换换行
+            # 第三步：转换 HTML 标签为文本格式
             raw_html = re.sub(r'<br\s*/?>', '\n', raw_html, flags=re.S)
             raw_html = re.sub(r'<p>', '\n', raw_html, flags=re.S)
             raw_html = re.sub(r'</p>', '', raw_html, flags=re.S)
@@ -183,60 +194,26 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
             raw_html = re.sub(r'</div>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<li>', '\n• ', raw_html, flags=re.S)
             raw_html = re.sub(r'</li>', '', raw_html, flags=re.S)
+            raw_html = re.sub(r'<tr>', '\n', raw_html, flags=re.S)
+            raw_html = re.sub(r'<td>', '\t', raw_html, flags=re.S)
+            raw_html = re.sub(r'</tr>|</td>', '', raw_html, flags=re.S)
+            # 去掉所有剩余标签
             raw_html = re.sub(r'<[^>]+>', '', raw_html, flags=re.S)
 
-            # 去掉 HTML 实体
+            # 第四步：处理 HTML 实体
             raw_html = raw_html.replace('&nbsp;', ' ')
             raw_html = raw_html.replace('&quot;', '"')
             raw_html = raw_html.replace('&amp;', '&')
             raw_html = raw_html.replace('&lt;', '<')
             raw_html = raw_html.replace('&gt;', '>')
+            raw_html = raw_html.replace('&#160;', ' ')
+            raw_html = raw_html.replace('&ensp;', ' ')
+            raw_html = raw_html.replace('&emsp;', ' ')
+            raw_html = raw_html.replace('&copy;', '©')
+            raw_html = raw_html.replace('&reg;', '®')
+            raw_html = raw_html.replace('&trade;', '™')
 
             content = raw_html.strip()
-
-        # ========== 内容清洗 ==========
-        if content:
-            # 去掉常见无用文字及其后面的内容（通常是尾部导航）
-            trash_keywords = [
-                '加入收藏', '收藏本文', '点击收藏', '我要收藏',
-                '上一篇', '下一篇', '上一条', '下一条',
-                '相关推荐', '热门推荐', '推荐阅读', '猜你喜欢',
-                '发表评论', '发表评论', '评论列表', '最新评论',
-                '分享本文', '分享到', '分享按钮',
-                '版权声明', '免责声明', '关于本站',
-                '阅读：', '阅读次数', '浏览量', '人气：',
-                '标签：', '关键词：', '分类：', '编辑：', '来源：',
-                '本文链接', '原文地址', '原文链接', '本文地址',
-                '返回列表', '返回首页', '返回顶部',
-                '赞助本站', '打赏', '支持作者',
-            ]
-
-            for kw in trash_keywords:
-                # 找到关键词位置，截断（保留关键词前面的内容）
-                idx = content.find(kw)
-                if idx != -1:
-                    content = content[:idx].strip()
-
-            # 去掉纯数字/符号的行（如页码导航）
-            lines = content.split('\n')
-            cleaned_lines = []
-            for line in lines:
-                line = line.strip()
-                # 跳过空行、纯数字、纯符号、过短的行（<3字且无中文）
-                if not line:
-                    continue
-                if re.match(r'^[\d\s\W]+$', line) and len(line) < 20:
-                    continue
-                # 跳过明显是导航的行
-                if re.match(r'^(上一|下一|相关|推荐|返回|分享|收藏|评论|阅读|标签|分类|编辑|来源|赞助|打赏|支持)', line):
-                    continue
-                cleaned_lines.append(line)
-
-            content = '\n'.join(cleaned_lines)
-
-            # 合并多余空行
-            content = re.sub(r'\n{3,}', '\n\n', content)
-            content = content.strip()
 
         # 兜底：如果正文为空，用标题
         if not content:
