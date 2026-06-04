@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-0818tuan.com 优惠信息采集 + 企业微信机器人推送（修复链接保留版）
+0818tuan.com 优惠信息采集 + 企业微信机器人推送
+修复：支持单引号href + 精确过滤垃圾<p>标签
 
 用法：
   export WEBHOOK_URL="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
@@ -138,88 +139,84 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
         )
         pub_time = time_match.group(1) if time_match else ""
 
-        # ========== 提取正文 ==========
+        # ========== 提取正文（基于真实HTML结构） ==========
         content = ""
 
-        content_match = re.search(r'<article[^>]*>(.*?)</article>', text, re.S)
+        # 策略1：匹配 <div class="post-content" id="xbcontent"> 的内容
+        # 源码中这个div后面是 <!-- 评论 开始 -->，用这个作为结束锚点
+        content_match = re.search(
+            r'<div[^>]*class="post-content"[^>]*>(.*?)</div>\s*<!-- 评论',
+            text, re.S
+        )
+        if not content_match:
+            # 兜底：匹配 article 或 content div
+            content_match = re.search(r'<article[^>]*>(.*?)</article>', text, re.S)
         if not content_match:
             content_match = re.search(
                 r'<div[^>]*class="[^"]*(?:content|post|entry)[^"]*"[^>]*>(.*?)</div>',
-                text, re.S
-            )
-        if not content_match:
-            content_match = re.search(
-                r'<div[^>]*id="[^"]*(?:content|post|entry)[^"]*"[^>]*>(.*?)</div>',
                 text, re.S
             )
 
         if content_match:
             raw_html = content_match.group(1)
 
-            # ========== 第一步：先提取所有链接（在删任何标签之前）==========
+            # ========== 第1步：先提取所有链接（支持单引号和双引号）==========
+            # 源码中：href='https://kzurl18.cn/t8ZrHC' 是单引号！
             def replace_link(m):
                 href = m.group(1).strip()
                 link_text = m.group(2).strip()
                 href = href.replace('&amp;', '&')
-                # 如果链接文本就是链接本身，且很短，直接返回链接
+                # 如果链接文本就是链接本身，直接返回链接
                 if link_text == href or (len(link_text) < 5 and href.startswith('http')):
                     return href
-                # 否则返回 文本(链接)
                 return f"{link_text}({href})"
 
-            # 匹配 <a href="...">...</a>，包括标签内有其他标签的情况
+            # 关键修复：href=[\'\"] 同时支持单引号和双引号
             raw_html = re.sub(
-                r'<a\s+[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                r'<a\s+[^>]*href=[\'\"]([^\'\"]+)[\'\"][^>]*>(.*?)</a>',
                 replace_link,
                 raw_html,
                 flags=re.S | re.I
             )
 
-            # ========== 第二步：去掉 script/style/iframe/noscript ==========
+            # ========== 第2步：去掉 script/style/iframe/noscript ==========
             raw_html = re.sub(r'<script.*?</script>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<style.*?</style>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<iframe.*?</iframe>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<noscript.*?</noscript>', '', raw_html, flags=re.S)
 
-            # ========== 第三步：只删除明确的垃圾标签块（非贪婪匹配，避免误删链接）==========
-            # 注意：这里用非贪婪 .*? 匹配，且只匹配到最近的闭合标签
-            trash_classes = [
-                'share', 'collect', 'favorite', 'fav', 'bookmark',
-                'prev', 'next', 'previous', 'navigation', 'nav', 'pager',
-                'related', 'recommend', 'guess', 'hot', 'sidebar',
-                'comment', 'reply', 'discuss', 'message',
-                'footer', 'copyright', 'declare', 'disclaimer',
-                'ad', 'ads', 'advert', 'sponsor', 'donate', 'reward',
-                'back', 'return', 'top', 'gotop', 'scrolltop',
-                'tag', 'keyword', 'category', 'source', 'editor', 'author',
-                'read', 'view', 'click', 'count', 'stat',
+            # ========== 第3步：过滤垃圾 <p> 标签（精确匹配）==========
+            # 源码中垃圾内容在普通 <p> 标签里，没有特定 class
+            # 通过内容关键词判断，删除整个 <p>...</p>
+            trash_keywords = [
+                '加入收藏', '上一篇', '下一篇', '上一条', '下一条',
+                '你可能还喜欢', '相关推荐', '热门推荐', '猜你喜欢',
+                'pageLink', '发表评论', '评论列表', '最新评论',
             ]
 
-            # 逐个关键词删除（非贪婪，避免跨标签匹配）
-            for kw in trash_classes:
-                # 匹配 <tag class/id="...kw...">...</tag>，非贪婪
-                pattern = (
-                    r'<(?:div|span|p|section|aside|footer|nav|ul|ol)[^>]*(?:class|id)="[^"]*' +
-                    kw +
-                    r'[^"]*"[^>]*>.*?</(?:div|span|p|section|aside|footer|nav|ul|ol)>'
-                )
-                raw_html = re.sub(pattern, '', raw_html, flags=re.S | re.I)
+            def filter_p(m):
+                p_html = m.group(0)  # 整个 <p>...</p>
+                p_text = re.sub(r'<[^>]+>', '', p_html)  # 去掉标签看纯文本
+                for kw in trash_keywords:
+                    if kw in p_text or kw in p_html:
+                        return ''  # 删除整个 <p>
+                return p_html  # 保留
 
-            # ========== 第四步：转换剩余 HTML 标签为文本 ==========
+            # 匹配 <p>...</p>（非贪婪，不跨标签）
+            raw_html = re.sub(r'<p[^>]*>.*?</p>', filter_p, raw_html, flags=re.S | re.I)
+
+            # ========== 第4步：转换剩余 HTML 标签为文本 ==========
             raw_html = re.sub(r'<br\s*/?>', '\n', raw_html, flags=re.S)
-            raw_html = re.sub(r'<p>', '\n', raw_html, flags=re.S)
+            raw_html = re.sub(r'<p[^>]*>', '\n', raw_html, flags=re.S)
             raw_html = re.sub(r'</p>', '', raw_html, flags=re.S)
-            raw_html = re.sub(r'<div>', '\n', raw_html, flags=re.S)
+            raw_html = re.sub(r'<div[^>]*>', '\n', raw_html, flags=re.S)
             raw_html = re.sub(r'</div>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<li>', '\n• ', raw_html, flags=re.S)
             raw_html = re.sub(r'</li>', '', raw_html, flags=re.S)
-            raw_html = re.sub(r'<tr>', '\n', raw_html, flags=re.S)
-            raw_html = re.sub(r'<td>', '\t', raw_html, flags=re.S)
-            raw_html = re.sub(r'</tr>|</td>', '', raw_html, flags=re.S)
             # 去掉所有剩余标签（此时 <a> 已经处理过了）
             raw_html = re.sub(r'<[^>]+>', '', raw_html, flags=re.S)
 
-            # ========== 第五步：处理 HTML 实体 ==========
+            # ========== 第5步：处理 HTML 实体 ==========
             raw_html = raw_html.replace('&nbsp;', ' ')
             raw_html = raw_html.replace('&quot;', '"')
             raw_html = raw_html.replace('&amp;', '&')
