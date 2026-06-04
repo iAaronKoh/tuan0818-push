@@ -337,8 +337,6 @@ def main():
 
         lines.append(content)
         lines.append("")
-        lines.append(f"🔗 {url}")
-        lines.append("-" * 20)
 
         full_text = "\n".join(lines)
 
