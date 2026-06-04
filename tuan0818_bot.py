@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-0818tuan.com 优惠信息采集 + 企业微信机器人推送（直接显示内容版）
+0818tuan.com 优惠信息采集 + 企业微信机器人推送（纯文本直接显示版）
 
 用法：
-  1. export WEBHOOK_URL="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
-  2. python3 tuan0818_bot.py
+  export WEBHOOK_URL="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+  python3 tuan0818_bot.py
 
 定时：GitHub Actions cron '*/10 * * * *'
 """
@@ -34,8 +34,8 @@ MAX_PAGES = 2          # 采集页数
 MAX_PUSH_COUNT = 10    # 每次最多推送条数
 HISTORY_FILE = "tuan0818_history.json"
 
-# 企业微信 Markdown 单条最大 4096 字节，留点余量
-MAX_CONTENT_LENGTH = 3500
+# 企业微信 text 消息最长 2048 字节，留余量
+MAX_TEXT_BYTES = 1900
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -58,25 +58,16 @@ logger = logging.getLogger(__name__)
 # ==================== 企业微信推送函数 ====================
 
 def send_text(content: str, mentioned_list: Optional[List[str]] = None) -> bool:
-    """发送纯文本消息（用于汇总）"""
+    """
+    发送纯文本消息（微信端完全支持，直接显示内容）
+    content: 最长 2048 字节
+    """
     data = {
         "msgtype": "text",
         "text": {
             "content": content,
             "mentioned_list": mentioned_list or [],
         },
-    }
-    return _post(data)
-
-
-def send_markdown(content: str) -> bool:
-    """
-    发送 Markdown 消息（直接显示内容）
-    企业微信支持的语法：标题、加粗、斜体、链接、引用、代码、颜色(green/gray/orange)
-    """
-    data = {
-        "msgtype": "markdown",
-        "markdown": {"content": content},
     }
     return _post(data)
 
@@ -272,49 +263,44 @@ def main():
         content = detail["content"]
         url = detail["url"]
 
-        # 组装 Markdown 内容（直接显示）
-        md_lines = []
+        # 组装纯文本内容（直接显示）
+        lines = []
+        lines.append(f"【{title}】")
+        lines.append("")
 
-        # 标题
-        md_lines.append(f"**🎁 {title}**")
-        md_lines.append("")
-
-        # 发布时间
         if pub_time:
-            md_lines.append(f"<font color='gray'>⏰ {pub_time}</font>")
-            md_lines.append("")
+            lines.append(f"⏰ {pub_time}")
+            lines.append("")
 
         # 正文内容
-        # 清理多余空行，保留换行
-        content_clean = content.strip()
-        # 企业微信 Markdown 中，换行需要双换行才能显示为段落分隔
-        # 但为了紧凑，我们用单换行 + 引用格式
-
-        # 如果内容太长，截断
-        if len(content_clean.encode('utf-8')) > MAX_CONTENT_LENGTH:
-            # 按字节截断，避免截断到半个汉字
-            truncated = content_clean.encode('utf-8')[:MAX_CONTENT_LENGTH].decode('utf-8', errors='ignore')
-            content_clean = truncated + "\n\n...（内容过长，已截断）"
-
-        md_lines.append(content_clean)
-        md_lines.append("")
+        lines.append(content)
+        lines.append("")
 
         # 原文链接
-        md_lines.append(f"<font color='info'>🔗 [查看原文]({url})</font>")
+        lines.append(f"🔗 {url}")
 
         # 分隔线
-        md_lines.append("---")
+        lines.append("-" * 20)
 
-        markdown_content = "\n".join(md_lines)
+        full_text = "\n".join(lines)
 
-        # 推送 Markdown（直接显示内容）
-        success = send_markdown(markdown_content)
+        # 检查长度，超长截断
+        text_bytes = full_text.encode('utf-8')
+        if len(text_bytes) > MAX_TEXT_BYTES:
+            # 截断到安全长度
+            truncated = text_bytes[:MAX_TEXT_BYTES].decode('utf-8', errors='ignore')
+            # 去掉最后一行可能截断的内容
+            truncated = truncated.rsplit('\n', 1)[0]
+            full_text = truncated + "\n\n...（内容过长，点击查看原文）\n" + url
+
+        # 推送纯文本（微信端完全支持）
+        success = send_text(full_text)
 
         if success:
             history.add(post_id)
             pushed_count += 1
 
-        time.sleep(1.5)  # 避免频率限制
+        time.sleep(1.5)
 
     # 保存历史
     save_history(history)
