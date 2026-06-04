@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-0818tuan.com 优惠信息采集 + 企业微信机器人推送
+0818tuan.com 优惠信息采集 + 企业微信机器人推送（直接显示内容版）
 
 用法：
-  1. 修改 WEBHOOK_URL 为你的企业微信机器人地址
+  1. export WEBHOOK_URL="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
   2. python3 tuan0818_bot.py
-  3. 定时运行（Linux/Mac）：crontab -e
-     */30 * * * * cd /path/to/script && python3 tuan0818_bot.py >> cron.log 2>&1
 
-依赖：pip install requests
+定时：GitHub Actions cron '*/10 * * * *'
 """
 
 import os
@@ -23,28 +21,22 @@ from typing import List, Dict, Optional
 
 # ==================== 配置区 ====================
 
-# 企业微信机器人 Webhook（必填！）
-# 建议通过环境变量设置：export WEBHOOK_URL="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
 WEBHOOK_URL = os.environ.get(
     "WEBHOOK_URL",
     "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key粘贴到这里"
 )
 
-# 采集配置
 BASE_URL = "http://www.0818tuan.com"
 LIST_URL_TEMPLATE = "http://www.0818tuan.com/list-1-{page}.html"
 DETAIL_URL_TEMPLATE = "http://www.0818tuan.com/xbhd/{post_id}.html"
 
-# 只采集前 N 页（每页约20-30条，0=最新页）
-MAX_PAGES = 2
-
-# 每次最多推送 N 条（避免刷屏）
-MAX_PUSH_COUNT = 10
-
-# 去重记录文件
+MAX_PAGES = 2          # 采集页数
+MAX_PUSH_COUNT = 10    # 每次最多推送条数
 HISTORY_FILE = "tuan0818_history.json"
 
-# 请求头
+# 企业微信 Markdown 单条最大 4096 字节，留点余量
+MAX_CONTENT_LENGTH = 3500
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -52,7 +44,6 @@ HEADERS = {
     "Referer": "http://www.0818tuan.com/",
 }
 
-# 日志配置
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -67,7 +58,7 @@ logger = logging.getLogger(__name__)
 # ==================== 企业微信推送函数 ====================
 
 def send_text(content: str, mentioned_list: Optional[List[str]] = None) -> bool:
-    """发送纯文本消息"""
+    """发送纯文本消息（用于汇总）"""
     data = {
         "msgtype": "text",
         "text": {
@@ -79,28 +70,13 @@ def send_text(content: str, mentioned_list: Optional[List[str]] = None) -> bool:
 
 
 def send_markdown(content: str) -> bool:
-    """发送 Markdown 消息"""
+    """
+    发送 Markdown 消息（直接显示内容）
+    企业微信支持的语法：标题、加粗、斜体、链接、引用、代码、颜色(green/gray/orange)
+    """
     data = {
         "msgtype": "markdown",
         "markdown": {"content": content},
-    }
-    return _post(data)
-
-
-def send_news(title: str, description: str, url: str, pic_url: str = "") -> bool:
-    """发送图文卡片（最推荐，可点击跳转）"""
-    data = {
-        "msgtype": "news",
-        "news": {
-            "articles": [
-                {
-                    "title": title,
-                    "description": description,
-                    "url": url,
-                    "picurl": pic_url,
-                }
-            ]
-        },
     }
     return _post(data)
 
@@ -129,9 +105,7 @@ def _post(data: Dict) -> bool:
 # ==================== 采集函数 ====================
 
 def fetch_list_page(page: int) -> List[Dict]:
-    """
-    采集列表页，返回 [{post_id, title, url}, ...]
-    """
+    """采集列表页"""
     url = LIST_URL_TEMPLATE.format(page=page)
     items = []
     try:
@@ -141,8 +115,6 @@ def fetch_list_page(page: int) -> List[Dict]:
             logger.warning(f"列表页 {page} 状态码异常: {resp.status_code}")
             return items
 
-        # 正则提取：ID + 标题
-        # 匹配格式如：xbhd/2207757.html" target="_blank" title="补贴 页面..."
         pattern = r'[d\/](\d{7,})\.html" target="_blank" title="([\u4e00-\u9fa5][^"]*)"'
         matches = re.findall(pattern, resp.text)
 
@@ -156,18 +128,13 @@ def fetch_list_page(page: int) -> List[Dict]:
         logger.info(f"📄 列表页 {page} 采集到 {len(items)} 条")
         return items
 
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ 列表页 {page} 请求失败: {e}")
-        return items
     except Exception as e:
         logger.error(f"❌ 列表页 {page} 异常: {e}")
         return items
 
 
 def fetch_detail(post_id: str) -> Optional[Dict]:
-    """
-    采集详情页，返回完整内容
-    """
+    """采集详情页"""
     url = DETAIL_URL_TEMPLATE.format(post_id=post_id)
     try:
         resp = requests.get(url, headers=HEADERS, timeout=20)
@@ -177,7 +144,7 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
 
         text = resp.text
 
-        # 提取标题（h1 标签）
+        # 提取标题
         title_match = re.search(r'<h1[^>]*>(.*?)</h1>', text, re.S)
         title = title_match.group(1).strip() if title_match else ""
         title = re.sub(r'<[^>]+>', '', title).strip()
@@ -189,7 +156,7 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
         )
         pub_time = time_match.group(1) if time_match else ""
 
-        # 提取正文内容
+        # 提取正文
         content = ""
         content_match = re.search(r'<article[^>]*>(.*?)</article>', text, re.S)
         if not content_match:
@@ -199,10 +166,8 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
             )
         if content_match:
             raw_html = content_match.group(1)
-            # 去掉 script/style
             raw_html = re.sub(r'<script.*?</script>', '', raw_html, flags=re.S)
             raw_html = re.sub(r'<style.*?</style>', '', raw_html, flags=re.S)
-            # 转换换行
             raw_html = re.sub(r'<br\s*/?>', '\n', raw_html, flags=re.S)
             raw_html = re.sub(r'<p>', '\n', raw_html, flags=re.S)
             raw_html = re.sub(r'</p>', '', raw_html, flags=re.S)
@@ -210,15 +175,8 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
             content = raw_html.strip()
             content = re.sub(r'\n{3,}', '\n\n', content)
 
-        # 如果没提取到内容，用标题兜底
         if not content:
             content = title
-
-        # 提取第一张图片作为封面
-        pic_url = ""
-        img_match = re.search(r'<img[^>]+src="(https?://[^"]+)"', text)
-        if img_match:
-            pic_url = img_match.group(1)
 
         return {
             "post_id": post_id,
@@ -226,7 +184,6 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
             "url": url,
             "pub_time": pub_time,
             "content": content,
-            "pic_url": pic_url,
         }
 
     except Exception as e:
@@ -237,7 +194,6 @@ def fetch_detail(post_id: str) -> Optional[Dict]:
 # ==================== 去重管理 ====================
 
 def load_history() -> set:
-    """加载已推送的记录"""
     if not os.path.exists(HISTORY_FILE):
         return set()
     try:
@@ -249,7 +205,6 @@ def load_history() -> set:
 
 
 def save_history(pushed_ids: set):
-    """保存已推送记录"""
     try:
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(
@@ -270,18 +225,17 @@ def save_history(pushed_ids: set):
 def main():
     logger.info("🚀 0818tuan 采集推送任务启动")
 
-    # 1. 加载历史记录
     history = load_history()
     logger.info(f"📚 历史记录: {len(history)} 条")
 
-    # 2. 采集列表
+    # 采集列表
     all_items = []
     for page in range(MAX_PAGES):
         items = fetch_list_page(page)
         if not items:
             break
         all_items.extend(items)
-        time.sleep(1)  # 礼貌间隔
+        time.sleep(1)
 
     if not all_items:
         logger.warning("⚠️ 未采集到任何数据，任务结束")
@@ -289,15 +243,13 @@ def main():
 
     logger.info(f"📦 总计采集 {len(all_items)} 条列表数据")
 
-    # 3. 去重，筛选新内容
+    # 去重
     new_items = [item for item in all_items if item["post_id"] not in history]
     if not new_items:
         logger.info("✅ 没有新内容，无需推送")
         return
 
     logger.info(f"🆕 发现 {len(new_items)} 条新内容")
-
-    # 4. 取最新 N 条进行详情采集和推送
     new_items = new_items[:MAX_PUSH_COUNT]
 
     pushed_count = 0
@@ -307,45 +259,67 @@ def main():
         # 采集详情
         detail = fetch_detail(post_id)
         if not detail:
-            # 详情失败，用列表页信息兜底推送
             detail = {
                 "post_id": post_id,
                 "title": item["title"],
                 "url": item["url"],
                 "pub_time": "",
                 "content": item["title"],
-                "pic_url": "",
             }
 
-        # 组装推送内容
         title = detail["title"] or item["title"]
-        # 描述取前 200 字
-        desc = detail["content"][:200].replace("\n", " ").strip()
-        if len(detail["content"]) > 200:
-            desc += "..."
+        pub_time = detail["pub_time"]
+        content = detail["content"]
+        url = detail["url"]
 
-        # 添加时间前缀
-        if detail["pub_time"]:
-            title = f"[{detail['pub_time'][5:16]}] {title}"
+        # 组装 Markdown 内容（直接显示）
+        md_lines = []
 
-        # 推送图文卡片
-        success = send_news(
-            title=title,
-            description=desc,
-            url=detail["url"],
-            pic_url=detail.get("pic_url", ""),
-        )
+        # 标题
+        md_lines.append(f"**🎁 {title}**")
+        md_lines.append("")
+
+        # 发布时间
+        if pub_time:
+            md_lines.append(f"<font color='gray'>⏰ {pub_time}</font>")
+            md_lines.append("")
+
+        # 正文内容
+        # 清理多余空行，保留换行
+        content_clean = content.strip()
+        # 企业微信 Markdown 中，换行需要双换行才能显示为段落分隔
+        # 但为了紧凑，我们用单换行 + 引用格式
+
+        # 如果内容太长，截断
+        if len(content_clean.encode('utf-8')) > MAX_CONTENT_LENGTH:
+            # 按字节截断，避免截断到半个汉字
+            truncated = content_clean.encode('utf-8')[:MAX_CONTENT_LENGTH].decode('utf-8', errors='ignore')
+            content_clean = truncated + "\n\n...（内容过长，已截断）"
+
+        md_lines.append(content_clean)
+        md_lines.append("")
+
+        # 原文链接
+        md_lines.append(f"<font color='info'>🔗 [查看原文]({url})</font>")
+
+        # 分隔线
+        md_lines.append("---")
+
+        markdown_content = "\n".join(md_lines)
+
+        # 推送 Markdown（直接显示内容）
+        success = send_markdown(markdown_content)
 
         if success:
             history.add(post_id)
             pushed_count += 1
 
-        time.sleep(1.5)  # 避免触发频率限制
+        time.sleep(1.5)  # 避免频率限制
 
-    # 5. 保存历史
+    # 保存历史
     save_history(history)
 
-    # 6. 发送汇总
+    # 发送汇总
     if pushed_count > 0:
         summary = (
             f"📢 0818tuan 推送完成\n"
